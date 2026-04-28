@@ -105,20 +105,21 @@ def upload_file():
     
     # 获取效果参数
     effect = request.form.get('effect', 'blur')
+    sensitivity = request.form.get('sensitivity', 'medium')
     
     # 加载白名单
     _, whitelist_boxes = load_known_faces(str(KNOWN_FACES_FOLDER))
     
     # 处理图片
     proc = get_processor()
-    result = proc.process_image(image, effect, whitelist_boxes)
+    result = proc.process_image(image, effect, whitelist_boxes, sensitivity)
     
     # 转换为 base64
     original_b64 = image_to_base64(image)
     result_b64 = image_to_base64(result)
     
     # 检测人脸数量
-    faces = proc.detect_faces(image)
+    faces = proc.detect_faces(image, sensitivity)
     face_count = len(faces)
     
     return jsonify({
@@ -144,19 +145,20 @@ def upload_base64():
         return jsonify({'error': f'图片解析失败: {str(e)}'}), 400
     
     effect = data.get('effect', 'blur')
+    sensitivity = data.get('sensitivity', 'medium')
     
     # 加载白名单
     _, whitelist_boxes = load_known_faces(str(KNOWN_FACES_FOLDER))
     
     # 处理图片
     proc = get_processor()
-    result = proc.process_image(image, effect, whitelist_boxes)
+    result = proc.process_image(image, effect, whitelist_boxes, sensitivity)
     
     # 转换为 base64
     result_b64 = image_to_base64(result)
     
     # 检测人脸
-    faces = proc.detect_faces(image)
+    faces = proc.detect_faces(image, sensitivity)
     face_count = len(faces)
     
     return jsonify({
@@ -176,6 +178,7 @@ def batch_process():
         return jsonify({'error': '没有选择文件'}), 400
     
     effect = request.form.get('effect', 'blur')
+    sensitivity = request.form.get('sensitivity', 'medium')
     proc = get_processor()
     
     # 加载白名单
@@ -195,7 +198,7 @@ def batch_process():
             if image is None:
                 continue
             
-            result = proc.process_image(image, effect, whitelist_boxes)
+            result = proc.process_image(image, effect, whitelist_boxes, sensitivity)
             
             # 保存结果
             filename = secure_filename(file.filename)
@@ -206,7 +209,7 @@ def batch_process():
             else:
                 cv2.imwrite(str(result_path), result)
             
-            faces = proc.detect_faces(image)
+            faces = proc.detect_faces(image, sensitivity)
             
             results.append({
                 'original_name': filename,

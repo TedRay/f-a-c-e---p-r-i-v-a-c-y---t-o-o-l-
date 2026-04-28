@@ -120,6 +120,37 @@
             margin-top: 5px;
         }
 
+        .sensitivity-selector {
+            display: flex;
+            gap: 10px;
+            margin: 15px 0;
+            align-items: center;
+        }
+
+        .sensitivity-selector label {
+            font-weight: bold;
+            color: #555;
+            white-space: nowrap;
+        }
+
+        .sensitivity-selector select {
+            padding: 8px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1em;
+            cursor: pointer;
+            outline: none;
+        }
+
+        .sensitivity-selector select:focus {
+            border-color: #667eea;
+        }
+
+        .sensitivity-selector .hint {
+            font-size: 0.85em;
+            color: #999;
+        }
+
         .effect-selector {
             display: flex;
             gap: 15px;
@@ -512,6 +543,16 @@
                     </div>
                 </div>
 
+                <div class="sensitivity-selector">
+                    <label>🔍 检测灵敏度:</label>
+                    <select id="single-sensitivity">
+                        <option value="low">低 (少检，误检少)</option>
+                        <option value="medium" selected>中 (平衡推荐)</option>
+                        <option value="high">高 (多检，可能误检)</option>
+                    </select>
+                    <span class="hint">人数不准时可切换灵敏度</span>
+                </div>
+
                 <div class="btn-group">
                     <button class="btn btn-primary" id="single-process-btn" onclick="processSingle()" disabled>开始处理</button>
                 </div>
@@ -566,6 +607,16 @@
                         <div class="name">表情包</div>
                         <div class="desc">可爱表情遮挡</div>
                     </div>
+                </div>
+
+                <div class="sensitivity-selector">
+                    <label>🔍 检测灵敏度:</label>
+                    <select id="batch-sensitivity">
+                        <option value="low">低 (少检，误检少)</option>
+                        <option value="medium" selected>中 (平衡推荐)</option>
+                        <option value="high">高 (多检，可能误检)</option>
+                    </select>
+                    <span class="hint">人数不准时可切换灵敏度</span>
                 </div>
 
                 <div class="btn-group">
@@ -695,6 +746,7 @@
             const formData = new FormData();
             formData.append('file', singleFile);
             formData.append('effect', singleEffect);
+            formData.append('sensitivity', document.getElementById('single-sensitivity').value);
 
             try {
                 const response = await fetch('/upload', { method: 'POST', body: formData });
@@ -743,6 +795,7 @@
             const formData = new FormData();
             batchFiles.forEach(f => formData.append('files', f));
             formData.append('effect', batchEffect);
+            formData.append('sensitivity', document.getElementById('batch-sensitivity').value);
 
             try {
                 const response = await fetch('/batch', { method: 'POST', body: formData });
