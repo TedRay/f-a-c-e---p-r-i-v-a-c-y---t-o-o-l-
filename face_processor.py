@@ -14,8 +14,9 @@ from typing import List, Tuple, Optional
 class FaceProcessor:
     """人脸检测与隐私处理核心类"""
     
-    # 白名单匹配相似度阈值（余弦相似度，越大越严格）
-    WHITELIST_THRESHOLD = 0.28
+    # 白名单匹配参数
+    # L2 距离阈值（越小越严格，同一个人通常 < 1.0，不同人通常 > 1.2）
+    WHITELIST_L2_THRESHOLD = 1.1
     
     def __init__(self, models_dir: str = None):
         """初始化人脸检测器"""
@@ -203,17 +204,20 @@ class FaceProcessor:
     
     def compute_similarity(self, feature1: np.ndarray, feature2: np.ndarray) -> float:
         """
-        计算两个人脸特征的余弦相似度
+        计算两个人脸特征的距离
+        
+        使用 L2 距离（欧氏距离），越小越相似
+        同一个人通常 < 1.0，不同人通常 > 1.2
         
         Args:
             feature1: 特征向量1
             feature2: 特征向量2
             
         Returns:
-            余弦相似度 (0~1，越大越相似)
+            L2 距离 (越小越相似)
         """
-        # 使用 OpenCV 内置的距离计算
-        score = self.face_recognizer.match(feature1, feature2, cv2.FaceRecognizerSF_FR_COSINE)
+        # 使用 OpenCV 内置的 L2 距离计算
+        score = self.face_recognizer.match(feature1, feature2, cv2.FaceRecognizerSF_FR_NORM_L2)
         return float(score)
     
     def detect_faces(self, image: np.ndarray, sensitivity: str = "medium") -> List[Tuple[int, int, int, int]]:
@@ -377,11 +381,11 @@ class FaceProcessor:
                 current_feature = self.extract_face_feature(image, face)
                 
                 if current_feature is not None:
-                    # 与每个白名单特征比对
+                    # 与每个白名单特征比对（L2 距离，越小越相似）
                     is_whitelisted = False
                     for wl_feature in whitelist_features:
-                        similarity = self.compute_similarity(current_feature, wl_feature)
-                        if similarity > self.WHITELIST_THRESHOLD:
+                        distance = self.compute_similarity(current_feature, wl_feature)
+                        if distance < self.WHITELIST_L2_THRESHOLD:
                             is_whitelisted = True
                             break
                     
