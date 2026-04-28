@@ -15,7 +15,7 @@ class FaceProcessor:
     """人脸检测与隐私处理核心类"""
     
     # 白名单匹配相似度阈值（余弦相似度，越大越严格）
-    WHITELIST_THRESHOLD = 0.36
+    WHITELIST_THRESHOLD = 0.28
     
     def __init__(self, models_dir: str = None):
         """初始化人脸检测器"""
@@ -168,13 +168,31 @@ class FaceProcessor:
             return None
         
         try:
-            # 裁剪人脸区域
-            face_roi = image[y:y+h, x:x+w]
+            # 裁剪人脸区域（多裁 20% 背景作为上下文）
+            pad_x = int(w * 0.2)
+            pad_y = int(h * 0.2)
+            x1 = max(0, x - pad_x)
+            y1 = max(0, y - pad_y)
+            x2 = min(image.shape[1], x + w + pad_x)
+            y2 = min(image.shape[0], y + h + pad_y)
+            
+            face_roi = image[y1:y2, x1:x2]
             if face_roi.size == 0:
                 return None
             
+            # 小人脸先放大再提取特征，提高质量
+            roi_h, roi_w = face_roi.shape[:2]
+            if roi_w < 100 or roi_h < 100:
+                scale = max(2, 112 // min(roi_w, roi_h) + 1)
+                face_roi = cv2.resize(face_roi, (roi_w * scale, roi_h * scale), 
+                                      interpolation=cv2.INTER_CUBIC)
+            
             # 缩放到 SFace 标准输入尺寸 (112x112)
             face_resized = cv2.resize(face_roi, (112, 112))
+            
+            # 轻微锐化提高细节
+            sharpen_kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+            face_resized = cv2.filter2D(face_resized, -1, sharpen_kernel * 0.3 + np.eye(3) * 0.7)
             
             # 提取特征
             feature = self.face_recognizer.feature(face_resized)
