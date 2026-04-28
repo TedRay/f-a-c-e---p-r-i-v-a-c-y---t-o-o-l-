@@ -229,19 +229,19 @@ class FaceProcessor:
         
         params = {
             "low": {
-                "dnn_input": 300, "dnn_conf": 0.6,
-                "haar_scale": 1.2, "haar_neighbors": 8, "haar_min_size": (40, 40),
+                "dnn_input": 300, "dnn_conf": 0.5,
+                "haar_scale": 1.15, "haar_neighbors": 6, "haar_min_size": (40, 40),
                 "iou_thresh": 0.3,
             },
             "medium": {
-                "dnn_input": 500, "dnn_conf": 0.4,
-                "haar_scale": 1.15, "haar_neighbors": 6, "haar_min_size": (35, 35),
-                "iou_thresh": 0.4,
+                "dnn_input": 500, "dnn_conf": 0.15,
+                "haar_scale": 1.05, "haar_neighbors": 3, "haar_min_size": (20, 20),
+                "iou_thresh": 0.3,
             },
             "high": {
-                "dnn_input": 600, "dnn_conf": 0.25,
-                "haar_scale": 1.08, "haar_neighbors": 4, "haar_min_size": (25, 25),
-                "iou_thresh": 0.5,
+                "dnn_input": 500, "dnn_conf": 0.1,
+                "haar_scale": 1.05, "haar_neighbors": 2, "haar_min_size": (15, 15),
+                "iou_thresh": 0.25,
             },
         }
         
