@@ -31,15 +31,22 @@ class FaceProcessor:
         if not proto_path.exists() or not model_path.exists():
             self._download_models(models_dir)
         
+        # 加载 DNN 模型
+        self.dnn_net = None
         try:
-            self.detector = cv2.dnn.readNetFromCaffe(str(proto_path), str(model_path))
-            self.use_dnn = True
+            self.dnn_net = cv2.dnn.readNetFromCaffe(str(proto_path), str(model_path))
             print("✓ DNN 人脸检测器加载成功")
         except Exception as e:
-            print(f"DNN 模型加载失败: {e}，使用 Haar 级联")
-            self.use_dnn = False
-            cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-            self.detector = cv2.CascadeClassifier(cascade_path)
+            print(f"DNN 模型加载失败: {e}")
+        
+        # 同时加载 Haar 级联作为补充
+        self.haar_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        )
+        self.haar_cascade_alt = cv2.CascadeClassifier(
+            cv2.data.haarcascades + 'haarcascade_frontalface_alt2.xml'
+        )
+        print("✓ Haar 级联检测器加载成功")
     
     def _download_models(self, models_dir: Path):
         """下载人脸检测模型"""
@@ -57,9 +64,55 @@ class FaceProcessor:
         except Exception as e:
             print(f"模型下载失败: {e}")
     
-    def detect_faces(self, image: np.ndarray, confidence: float = 0.5) -> List[Tuple[int, int, int, int]]:
+    def _expand_face_box(self, x, y, w, h, img_h, img_w, padding=0.3):
+        """扩展人脸边界框，确保完全覆盖"""
+        pad_w = int(w * padding)
+        pad_h = int(h * padding)
+        
+        new_x = max(0, x - pad_w)
+        new_y = max(0, y - pad_h)
+        new_w = min(img_w - new_x, w + 2 * pad_w)
+        new_h = min(img_h - new_y, h + 2 * pad_h)
+        
+        return new_x, new_y, new_w, new_h
+    
+    def _merge_faces(self, faces, iou_threshold=0.3):
+        """合并重叠的人脸框（非极大值抑制）"""
+        if not faces:
+            return faces
+        
+        boxes = np.array([[x, y, x + w, y + h] for (x, y, w, h) in faces])
+        
+        x1 = boxes[:, 0]
+        y1 = boxes[:, 1]
+        x2 = boxes[:, 2]
+        y2 = boxes[:, 3]
+        areas = (x2 - x1) * (y2 - y1)
+        
+        # 按面积排序（大到小）
+        order = areas.argsort()[::-1]
+        
+        keep = []
+        while order.size > 0:
+            i = order[0]
+            keep.append(i)
+            
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+            
+            inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
+            iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
+            
+            inds = np.where(iou <= iou_threshold)[0]
+            order = order[inds + 1]
+        
+        return [faces[i] for i in keep]
+    
+    def detect_faces(self, image: np.ndarray, confidence: float = 0.3) -> List[Tuple[int, int, int, int]]:
         """
-        检测图片中的人脸
+        检测图片中的人脸（多方法融合，提高检出率）
         
         Args:
             image: 输入图片 (BGR 格式)
@@ -69,44 +122,61 @@ class FaceProcessor:
             人脸边界框列表 [(x, y, w, h), ...]
         """
         h, w = image.shape[:2]
-        faces = []
+        all_faces = []
         
-        if self.use_dnn:
-            # DNN 方法
+        # 方法1: DNN 检测
+        if self.dnn_net is not None:
             blob = cv2.dnn.blobFromImage(image, 1.0, (300, 300), (104, 177, 123))
-            self.detector.setInput(blob)
-            detections = self.detector.forward()
+            self.dnn_net.setInput(blob)
+            detections = self.dnn_net.forward()
             
             for i in range(detections.shape[2]):
                 conf = detections[0, 0, i, 2]
                 if conf > confidence:
                     box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
                     (startX, startY, endX, endY) = box.astype("int")
-                    # 确保边界框在图片范围内
                     startX, startY = max(0, startX), max(0, startY)
                     endX, endY = min(w, endX), min(h, endY)
-                    faces.append((startX, startY, endX - startX, endY - startY))
-        else:
-            # Haar 级联方法
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            detected = self.detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-            faces = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in detected]
+                    fw, fh = endX - startX, endY - startY
+                    if fw > 10 and fh > 10:  # 过滤太小的框
+                        all_faces.append((startX, startY, fw, fh))
         
-        return faces
+        # 方法2: Haar 级联检测（标准参数）
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # 使用多组参数提高检出率
+        haar_params = [
+            # (scaleFactor, minNeighbors, minSize)
+            (1.05, 3, (20, 20)),   # 宽松：适合小人脸
+            (1.1, 4, (30, 30)),    # 中等
+            (1.08, 3, (25, 25)),   # 中等偏宽松
+        ]
+        
+        for cascade in [self.haar_cascade, self.haar_cascade_alt]:
+            for (scale, neighbors, min_size) in haar_params:
+                detected = cascade.detectMultiScale(gray, scaleFactor=scale, 
+                                                     minNeighbors=neighbors, minSize=min_size)
+                for (fx, fy, fw, fh) in detected:
+                    fx, fy, fw, fh = int(fx), int(fy), int(fw), int(fh)
+                    if fw > 10 and fh > 10:
+                        all_faces.append((fx, fy, fw, fh))
+        
+        # 去重：合并重叠的人脸框
+        unique_faces = self._merge_faces(all_faces, iou_threshold=0.3)
+        
+        # 扩展边界框，确保完全覆盖人脸
+        expanded = []
+        for (fx, fy, fw, fh) in unique_faces:
+            ex, ey, ew, eh = self._expand_face_box(fx, fy, fw, fh, h, w, padding=0.25)
+            expanded.append((ex, ey, ew, eh))
+        
+        return expanded
     
     def apply_blur(self, image: np.ndarray, face: Tuple[int, int, int, int]) -> np.ndarray:
         """
         应用模糊平滑效果
-        
-        Args:
-            image: 输入图片
-            face: 人脸边界框 (x, y, w, h)
-            
-        Returns:
-            处理后的图片
         """
         x, y, w, h = face
-        # 确保坐标有效
         x, y = max(0, x), max(0, y)
         w = min(w, image.shape[1] - x)
         h = min(h, image.shape[0] - y)
@@ -115,9 +185,8 @@ class FaceProcessor:
             return image
         
         face_region = image[y:y+h, x:x+w]
-        # 使用双边滤波保持边缘，同时模糊细节
+        # 双边滤波 + 高斯模糊
         blurred = cv2.bilateralFilter(face_region, 15, 80, 80)
-        # 多次模糊增强效果
         blurred = cv2.GaussianBlur(blurred, (25, 25), 30)
         
         result = image.copy()
@@ -128,14 +197,6 @@ class FaceProcessor:
                        block_size: int = 15) -> np.ndarray:
         """
         应用像素化效果
-        
-        Args:
-            image: 输入图片
-            face: 人脸边界框 (x, y, w, h)
-            block_size: 像素块大小
-            
-        Returns:
-            处理后的图片
         """
         x, y, w, h = face
         x, y = max(0, x), max(0, y)
@@ -146,8 +207,6 @@ class FaceProcessor:
             return image
         
         face_region = image[y:y+h, x:x+w]
-        
-        # 缩小再放大实现像素化
         small = cv2.resize(face_region, (max(1, w // block_size), max(1, h // block_size)), 
                           interpolation=cv2.INTER_LINEAR)
         pixelated = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
@@ -160,14 +219,6 @@ class FaceProcessor:
                    emoji_path: str = None) -> np.ndarray:
         """
         应用表情包贴纸效果
-        
-        Args:
-            image: 输入图片
-            face: 人脸边界框 (x, y, w, h)
-            emoji_path: 表情包图片路径（可选）
-            
-        Returns:
-            处理后的图片
         """
         x, y, w, h = face
         x, y = max(0, x), max(0, y)
@@ -177,24 +228,22 @@ class FaceProcessor:
         if w <= 0 or h <= 0:
             return image
         
-        # 使用内置可爱表情（用文字绘制）
         result = image.copy()
         
-        # 绘制彩色圆形背景
         center = (x + w // 2, y + h // 2)
         radius = max(w, h) // 2
         
-        # 绘制黄色圆形
-        cv2.circle(result, center, radius, (52, 213, 255), -1)  # BGR: 黄色
-        cv2.circle(result, center, radius, (0, 0, 0), 3)  # 黑色边框
+        # 黄色圆形
+        cv2.circle(result, center, radius, (52, 213, 255), -1)
+        cv2.circle(result, center, radius, (0, 0, 0), 3)
         
-        # 绘制眼睛
+        # 眼睛
         eye_y = center[1] - radius // 4
         eye_offset = radius // 3
         cv2.circle(result, (center[0] - eye_offset, eye_y), radius // 8, (0, 0, 0), -1)
         cv2.circle(result, (center[0] + eye_offset, eye_y), radius // 8, (0, 0, 0), -1)
         
-        # 绘制笑脸
+        # 笑脸
         smile_y = center[1] + radius // 4
         smile_radius = radius // 2
         cv2.ellipse(result, (center[0], smile_y), (smile_radius, smile_radius // 2), 
@@ -207,15 +256,6 @@ class FaceProcessor:
                       whitelist_embeddings: List[np.ndarray] = None) -> np.ndarray:
         """
         处理单张图片，对非白名单人脸应用隐私保护效果
-        
-        Args:
-            image: 输入图片
-            effect: 效果类型 ('blur', 'pixelate', 'emoji')
-            whitelist_faces: 白名单人脸边界框列表
-            whitelist_embeddings: 白名单人脸特征向量列表
-            
-        Returns:
-            处理后的图片
         """
         faces = self.detect_faces(image)
         
@@ -227,7 +267,7 @@ class FaceProcessor:
         for face in faces:
             x, y, w, h = face
             
-            # 检查是否在白名单中（简化版本：基于位置重叠）
+            # 检查是否在白名单中
             if whitelist_faces:
                 is_whitelisted = False
                 face_center = (x + w // 2, y + h // 2)
@@ -236,14 +276,13 @@ class FaceProcessor:
                     wl_x, wl_y, wl_w, wl_h = wl_face
                     wl_center = (wl_x + wl_w // 2, wl_y + wl_h // 2)
                     
-                    # 计算中心点距离
                     dist = np.sqrt((face_center[0] - wl_center[0])**2 + (face_center[1] - wl_center[1])**2)
                     if dist < max(w, h) // 2:
                         is_whitelisted = True
                         break
                 
                 if is_whitelisted:
-                    continue  # 跳过白名单人脸
+                    continue
             
             # 应用隐私保护效果
             if effect == "blur":
@@ -259,12 +298,6 @@ class FaceProcessor:
 def load_known_faces(known_faces_dir: str) -> Tuple[List[np.ndarray], List[Tuple[int, int, int, int]]]:
     """
     加载白名单人脸
-    
-    Args:
-        known_faces_dir: 白名单人脸图片目录
-        
-    Returns:
-        (人脸图片列表, 人脸边界框列表)
     """
     known_faces = []
     face_boxes = []
@@ -282,7 +315,7 @@ def load_known_faces(known_faces_dir: str) -> Tuple[List[np.ndarray], List[Tuple
                 faces = processor.detect_faces(img)
                 if faces:
                     known_faces.append(img)
-                    face_boxes.append(faces[0])  # 取第一张人脸
+                    face_boxes.append(faces[0])
     
     return known_faces, face_boxes
 
@@ -291,19 +324,9 @@ def process_batch(input_dir: str, output_dir: str, effect: str = "blur",
                   known_faces_dir: str = None) -> List[str]:
     """
     批量处理图片
-    
-    Args:
-        input_dir: 输入目录
-        output_dir: 输出目录
-        effect: 效果类型
-        known_faces_dir: 白名单人脸目录
-        
-    Returns:
-        处理成功的文件列表
     """
     processor = FaceProcessor()
     
-    # 加载白名单
     whitelist_boxes = []
     if known_faces_dir and Path(known_faces_dir).exists():
         _, whitelist_boxes = load_known_faces(known_faces_dir)
@@ -332,6 +355,5 @@ def process_batch(input_dir: str, output_dir: str, effect: str = "blur",
 
 
 if __name__ == "__main__":
-    # 测试代码
     processor = FaceProcessor()
     print("人脸处理器初始化完成")
