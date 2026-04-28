@@ -107,12 +107,12 @@ def upload_file():
     effect = request.form.get('effect', 'blur')
     sensitivity = request.form.get('sensitivity', 'medium')
     
-    # 加载白名单
-    _, whitelist_boxes = load_known_faces(str(KNOWN_FACES_FOLDER))
+    # 加载白名单特征
+    _, whitelist_features = load_known_faces(str(KNOWN_FACES_FOLDER))
     
     # 处理图片
     proc = get_processor()
-    result = proc.process_image(image, effect, whitelist_boxes, sensitivity)
+    result = proc.process_image(image, effect, whitelist_features, sensitivity)
     
     # 转换为 base64
     original_b64 = image_to_base64(image)
@@ -126,7 +126,7 @@ def upload_file():
         'original': f'data:image/jpeg;base64,{original_b64}',
         'result': f'data:image/jpeg;base64,{result_b64}',
         'face_count': face_count,
-        'whitelist_count': len(whitelist_boxes)
+        'whitelist_count': len(whitelist_features)
     })
 
 @app.route('/upload_base64', methods=['POST'])
@@ -147,12 +147,12 @@ def upload_base64():
     effect = data.get('effect', 'blur')
     sensitivity = data.get('sensitivity', 'medium')
     
-    # 加载白名单
-    _, whitelist_boxes = load_known_faces(str(KNOWN_FACES_FOLDER))
+    # 加载白名单特征
+    _, whitelist_features = load_known_faces(str(KNOWN_FACES_FOLDER))
     
     # 处理图片
     proc = get_processor()
-    result = proc.process_image(image, effect, whitelist_boxes, sensitivity)
+    result = proc.process_image(image, effect, whitelist_features, sensitivity)
     
     # 转换为 base64
     result_b64 = image_to_base64(result)
@@ -164,7 +164,7 @@ def upload_base64():
     return jsonify({
         'result': f'data:image/jpeg;base64,{result_b64}',
         'face_count': face_count,
-        'whitelist_count': len(whitelist_boxes)
+        'whitelist_count': len(whitelist_features)
     })
 
 @app.route('/batch', methods=['POST'])
@@ -181,8 +181,8 @@ def batch_process():
     sensitivity = request.form.get('sensitivity', 'medium')
     proc = get_processor()
     
-    # 加载白名单
-    _, whitelist_boxes = load_known_faces(str(KNOWN_FACES_FOLDER))
+    # 加载白名单特征
+    _, whitelist_features = load_known_faces(str(KNOWN_FACES_FOLDER))
     
     results = []
     session_id = str(uuid.uuid4())[:8]
@@ -198,7 +198,7 @@ def batch_process():
             if image is None:
                 continue
             
-            result = proc.process_image(image, effect, whitelist_boxes, sensitivity)
+            result = proc.process_image(image, effect, whitelist_features, sensitivity)
             
             # 保存结果
             filename = secure_filename(file.filename)

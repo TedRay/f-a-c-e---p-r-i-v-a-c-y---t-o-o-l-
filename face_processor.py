@@ -9,10 +9,13 @@ import cv2
 import numpy as np
 import os
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 class FaceProcessor:
     """人脸检测与隐私处理核心类"""
+    
+    # 白名单匹配相似度阈值（余弦相似度，越大越严格）
+    WHITELIST_THRESHOLD = 0.36
     
     def __init__(self, models_dir: str = None):
         """初始化人脸检测器"""
@@ -22,12 +25,16 @@ class FaceProcessor:
         models_dir = Path(models_dir)
         models_dir.mkdir(exist_ok=True)
         
+        self.models_dir = models_dir
+        
         proto_path = models_dir / "deploy.prototxt"
         model_path = models_dir / "res10_300x300_ssd_iter_140000.caffemodel"
+        face_rec_path = models_dir / "face_recognition_sface_2021dec.onnx"
         
         if not proto_path.exists() or not model_path.exists():
             self._download_models(models_dir)
         
+        # DNN 人脸检测器
         self.dnn_net = None
         try:
             self.dnn_net = cv2.dnn.readNetFromCaffe(str(proto_path), str(model_path))
@@ -35,37 +42,56 @@ class FaceProcessor:
         except Exception as e:
             print(f"DNN 模型加载失败: {e}")
         
+        # Haar 级联
         self.haar_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
         )
         print("✓ Haar 级联检测器加载成功")
+        
+        # 人脸特征提取器（SFace）
+        self.face_recognizer = None
+        if face_rec_path.exists():
+            try:
+                self.face_recognizer = cv2.FaceRecognizerSF.create(
+                    str(face_rec_path), ""
+                )
+                print("✓ SFace 人脸识别器加载成功")
+            except Exception as e:
+                print(f"SFace 模型加载失败: {e}")
+        else:
+            print("⚠ SFace 模型未找到，白名单将使用位置匹配")
     
     def _download_models(self, models_dir: Path):
         """下载人脸检测模型"""
         import urllib.request
         proto_url = "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt"
         model_url = "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel"
+        face_rec_url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
         
         print("正在下载人脸检测模型...")
         try:
             urllib.request.urlretrieve(proto_url, str(models_dir / "deploy.prototxt"))
             urllib.request.urlretrieve(model_url, str(models_dir / "res10_300x300_ssd_iter_140000.caffemodel"))
-            print("✓ 模型下载完成")
+            print("✓ 检测模型下载完成")
         except Exception as e:
-            print(f"模型下载失败: {e}")
+            print(f"检测模型下载失败: {e}")
+        
+        print("正在下载人脸识别模型...")
+        try:
+            urllib.request.urlretrieve(face_rec_url, str(models_dir / "face_recognition_sface_2021dec.onnx"))
+            print("✓ 识别模型下载完成")
+        except Exception as e:
+            print(f"识别模型下载失败: {e}")
     
     def _is_valid_face(self, x, y, w, h, img_h, img_w):
         """验证人脸框有效性"""
-        # 尺寸限制
         if w < 25 or h < 25:
             return False
         if w > img_w * 0.6 or h > img_h * 0.6:
             return False
-        # 宽高比限制（人脸接近正方形）
         aspect = w / h if h > 0 else 0
         if aspect < 0.5 or aspect > 2.0:
             return False
-        # 位置限制
         if x < 0 or y < 0:
             return False
         if x + w > img_w or y + h > img_h:
@@ -117,51 +143,89 @@ class FaceProcessor:
         nh = min(img_h - ny, h + 2 * py)
         return nx, ny, nw, nh
     
+    def extract_face_feature(self, image: np.ndarray, face: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
+        """
+        提取人脸特征向量
+        
+        Args:
+            image: 原始图片
+            face: 人脸边界框 (x, y, w, h)
+            
+        Returns:
+            128维特征向量，失败返回 None
+        """
+        if self.face_recognizer is None:
+            return None
+        
+        x, y, w, h = face
+        
+        # 确保坐标有效
+        x, y = max(0, x), max(0, y)
+        w = min(w, image.shape[1] - x)
+        h = min(h, image.shape[0] - y)
+        
+        if w <= 10 or h <= 10:
+            return None
+        
+        try:
+            # 裁剪人脸区域
+            face_roi = image[y:y+h, x:x+w]
+            if face_roi.size == 0:
+                return None
+            
+            # 缩放到 SFace 标准输入尺寸 (112x112)
+            face_resized = cv2.resize(face_roi, (112, 112))
+            
+            # 提取特征
+            feature = self.face_recognizer.feature(face_resized)
+            return feature
+        except Exception as e:
+            print(f"特征提取失败: {e}")
+            return None
+    
+    def compute_similarity(self, feature1: np.ndarray, feature2: np.ndarray) -> float:
+        """
+        计算两个人脸特征的余弦相似度
+        
+        Args:
+            feature1: 特征向量1
+            feature2: 特征向量2
+            
+        Returns:
+            余弦相似度 (0~1，越大越相似)
+        """
+        # 使用 OpenCV 内置的距离计算
+        score = self.face_recognizer.match(feature1, feature2, cv2.FaceRecognizerSF_FR_COSINE)
+        return float(score)
+    
     def detect_faces(self, image: np.ndarray, sensitivity: str = "medium") -> List[Tuple[int, int, int, int]]:
         """
         检测图片中的人脸
-        
-        Args:
-            image: 输入图片 (BGR 格式)
-            sensitivity: 灵敏度 - 'low'(少检误检少), 'medium'(平衡), 'high'(多检可能误检)
-        
-        Returns:
-            人脸边界框列表 [(x, y, w, h), ...]
         """
         h, w = image.shape[:2]
         all_faces = []
         
-        # 灵敏度参数映射
         params = {
             "low": {
-                "dnn_input": 300,
-                "dnn_conf": 0.6,
-                "haar_scale": 1.2,
-                "haar_neighbors": 8,
-                "haar_min_size": (40, 40),
+                "dnn_input": 300, "dnn_conf": 0.6,
+                "haar_scale": 1.2, "haar_neighbors": 8, "haar_min_size": (40, 40),
                 "iou_thresh": 0.3,
             },
             "medium": {
-                "dnn_input": 500,
-                "dnn_conf": 0.4,
-                "haar_scale": 1.15,
-                "haar_neighbors": 6,
-                "haar_min_size": (35, 35),
+                "dnn_input": 500, "dnn_conf": 0.4,
+                "haar_scale": 1.15, "haar_neighbors": 6, "haar_min_size": (35, 35),
                 "iou_thresh": 0.4,
             },
             "high": {
-                "dnn_input": 600,
-                "dnn_conf": 0.25,
-                "haar_scale": 1.08,
-                "haar_neighbors": 4,
-                "haar_min_size": (25, 25),
+                "dnn_input": 600, "dnn_conf": 0.25,
+                "haar_scale": 1.08, "haar_neighbors": 4, "haar_min_size": (25, 25),
                 "iou_thresh": 0.5,
             },
         }
         
         p = params.get(sensitivity, params["medium"])
         
-        # === DNN 检测 ===
+        # DNN 检测
         if self.dnn_net is not None:
             input_size = p["dnn_input"]
             blob = cv2.dnn.blobFromImage(image, 1.0, (input_size, input_size), (104, 177, 123))
@@ -180,25 +244,21 @@ class FaceProcessor:
                     if self._is_valid_face(sx, sy, fw, fh, h, w):
                         all_faces.append(((sx, sy, fw, fh), float(conf)))
         
-        # === Haar 补充检测 ===
+        # Haar 补充检测
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
         detected = self.haar_cascade.detectMultiScale(
-            gray,
-            scaleFactor=p["haar_scale"],
-            minNeighbors=p["haar_neighbors"],
-            minSize=p["haar_min_size"],
-            maxSize=(int(w * 0.4), int(h * 0.4))
+            gray, scaleFactor=p["haar_scale"], minNeighbors=p["haar_neighbors"],
+            minSize=p["haar_min_size"], maxSize=(int(w * 0.4), int(h * 0.4))
         )
         
         for (fx, fy, fw, fh) in detected:
             if self._is_valid_face(int(fx), int(fy), int(fw), int(fh), h, w):
                 all_faces.append(((int(fx), int(fy), int(fw), int(fh)), 0.35))
         
-        # === NMS 去重 ===
+        # NMS 去重
         unique_faces = self._nms(all_faces, iou_threshold=p["iou_thresh"])
         
-        # === 扩展边界框 ===
+        # 扩展边界框
         expanded = []
         for (fx, fy, fw, fh) in unique_faces:
             ex, ey, ew, eh = self._expand_box(fx, fy, fw, fh, h, w, padding=0.15)
@@ -271,10 +331,18 @@ class FaceProcessor:
         
         return result
     
-    def process_image(self, image: np.ndarray, effect: str = "blur", 
-                      whitelist_faces: List[Tuple[int, int, int, int]] = None,
+    def process_image(self, image: np.ndarray, effect: str = "blur",
+                      whitelist_features: List[np.ndarray] = None,
                       sensitivity: str = "medium") -> np.ndarray:
-        """处理单张图片"""
+        """
+        处理单张图片，对非白名单人脸应用隐私保护效果
+        
+        Args:
+            image: 输入图片
+            effect: 效果类型
+            whitelist_features: 白名单人员的人脸特征向量列表
+            sensitivity: 检测灵敏度
+        """
         faces = self.detect_faces(image, sensitivity)
         
         if not faces:
@@ -285,21 +353,24 @@ class FaceProcessor:
         for face in faces:
             x, y, w, h = face
             
-            if whitelist_faces:
-                is_whitelisted = False
-                face_center = (x + w // 2, y + h // 2)
+            # 白名单特征比对
+            if whitelist_features and self.face_recognizer is not None:
+                # 提取当前人脸特征
+                current_feature = self.extract_face_feature(image, face)
                 
-                for wl_face in whitelist_faces:
-                    wl_x, wl_y, wl_w, wl_h = wl_face
-                    wl_center = (wl_x + wl_w // 2, wl_y + wl_h // 2)
-                    dist = np.sqrt((face_center[0] - wl_center[0])**2 + (face_center[1] - wl_center[1])**2)
-                    if dist < max(w, h) // 2:
-                        is_whitelisted = True
-                        break
-                
-                if is_whitelisted:
-                    continue
+                if current_feature is not None:
+                    # 与每个白名单特征比对
+                    is_whitelisted = False
+                    for wl_feature in whitelist_features:
+                        similarity = self.compute_similarity(current_feature, wl_feature)
+                        if similarity > self.WHITELIST_THRESHOLD:
+                            is_whitelisted = True
+                            break
+                    
+                    if is_whitelisted:
+                        continue  # 跳过白名单人脸
             
+            # 应用隐私保护效果
             if effect == "blur":
                 result = self.apply_blur(result, face)
             elif effect == "pixelate":
@@ -310,27 +381,49 @@ class FaceProcessor:
         return result
 
 
-def load_known_faces(known_faces_dir: str):
-    """加载白名单人脸"""
+def load_known_faces(known_faces_dir: str) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """
+    加载白名单人脸特征
+    
+    Args:
+        known_faces_dir: 白名单人脸图片目录
+        
+    Returns:
+        (人脸图片列表, 人脸特征向量列表)
+    """
     known_faces = []
-    face_boxes = []
+    face_features = []
     
     processor = FaceProcessor()
     known_dir = Path(known_faces_dir)
     
     if not known_dir.exists():
-        return known_faces, face_boxes
+        return known_faces, face_features
     
     for img_path in known_dir.glob("*"):
-        if img_path.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp"]:
-            img = cv2.imread(str(img_path))
-            if img is not None:
-                faces = processor.detect_faces(img)
-                if faces:
-                    known_faces.append(img)
-                    face_boxes.append(faces[0])
+        if img_path.suffix.lower() not in [".jpg", ".jpeg", ".png", ".bmp"]:
+            continue
+        
+        img = cv2.imread(str(img_path))
+        if img is None:
+            continue
+        
+        faces = processor.detect_faces(img, "medium")
+        if not faces:
+            continue
+        
+        # 提取人脸特征（取最大的人脸框）
+        best_face = max(faces, key=lambda f: f[2] * f[3])
+        feature = processor.extract_face_feature(img, best_face)
+        
+        if feature is not None:
+            known_faces.append(img)
+            face_features.append(feature)
+            print(f"✓ 白名单加载: {img_path.name}, 特征维度 {feature.shape}")
+        else:
+            print(f"⚠ 白名单跳过: {img_path.name}, 特征提取失败")
     
-    return known_faces, face_boxes
+    return known_faces, face_features
 
 
 def process_batch(input_dir: str, output_dir: str, effect: str = "blur",
@@ -338,9 +431,9 @@ def process_batch(input_dir: str, output_dir: str, effect: str = "blur",
     """批量处理图片"""
     processor = FaceProcessor()
     
-    whitelist_boxes = []
+    whitelist_features = []
     if known_faces_dir and Path(known_faces_dir).exists():
-        _, whitelist_boxes = load_known_faces(known_faces_dir)
+        _, whitelist_features = load_known_faces(known_faces_dir)
     
     input_path = Path(input_dir)
     output_path = Path(output_dir)
@@ -356,7 +449,7 @@ def process_batch(input_dir: str, output_dir: str, effect: str = "blur",
         if img is None:
             continue
         
-        result = processor.process_image(img, effect, whitelist_boxes)
+        result = processor.process_image(img, effect, whitelist_features)
         
         output_file = output_path / f"processed_{img_path.name}"
         cv2.imwrite(str(output_file), result)
