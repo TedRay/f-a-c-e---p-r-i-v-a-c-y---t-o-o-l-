@@ -848,7 +848,7 @@
                 } else {
                     grid.innerHTML = data.whitelist.map(item => `
                         <div class="whitelist-item">
-                            <button class="delete-btn" onclick="deleteWhitelist('${item.name}')">✕</button>
+                            <button class="delete-btn" onclick="deleteWhitelist('${item.id}', '${item.name}')">✕</button>
                             <div style="font-size: 2em;">👤</div>
                             <div class="name">${item.name}</div>
                             <div class="faces">${item.face_count} 张人脸</div>
@@ -895,11 +895,11 @@
             }
         }
 
-        async function deleteWhitelist(name) {
+        async function deleteWhitelist(id, name) {
             if (!confirm(`确定要删除 ${name} 吗？`)) return;
 
             try {
-                const response = await fetch(`/whitelist/delete/${name}`);
+                const response = await fetch(`/whitelist/delete/${id}`);
                 const data = await response.json();
 
                 if (data.success) {

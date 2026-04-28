@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import uuid
 import base64
+import json
 from io import BytesIO
 import time
 
@@ -50,6 +51,35 @@ def get_processor():
 def allowed_file(filename):
     """检查文件扩展名是否允许"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def _whitelist_names_path():
+    """白名单姓名映射文件路径"""
+    return KNOWN_FACES_FOLDER / '_names.json'
+
+def _load_whitelist_names():
+    """加载白名单姓名映射"""
+    path = _whitelist_names_path()
+    if path.exists():
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def _save_whitelist_name(file_id, name):
+    """保存白名单姓名映射"""
+    names = _load_whitelist_names()
+    names[file_id] = name
+    with open(_whitelist_names_path(), 'w', encoding='utf-8') as f:
+        json.dump(names, f, ensure_ascii=False, indent=2)
+
+def _remove_whitelist_name(file_id):
+    """删除白名单姓名映射"""
+    names = _load_whitelist_names()
+    names.pop(file_id, None)
+    with open(_whitelist_names_path(), 'w', encoding='utf-8') as f:
+        json.dump(names, f, ensure_ascii=False, indent=2)
 
 def image_to_base64(image, format='.jpg'):
     """将 OpenCV 图片转换为 base64 字符串"""
@@ -255,52 +285,54 @@ def add_whitelist():
     if not faces:
         return jsonify({'error': '未检测到人脸，请上传包含人脸的清晰照片'}), 400
     
-    # 保存到白名单目录
-    safe_name = secure_filename(name)
+    # 使用 UUID 作为文件名，避免中文路径问题
+    file_id = str(uuid.uuid4())[:8]
     ext = os.path.splitext(file.filename)[1] or '.jpg'
-    save_path = KNOWN_FACES_FOLDER / f"{safe_name}{ext}"
-    
-    # 避免覆盖
-    counter = 1
-    while save_path.exists():
-        save_path = KNOWN_FACES_FOLDER / f"{safe_name}_{counter}{ext}"
-        counter += 1
+    save_path = KNOWN_FACES_FOLDER / f"{file_id}{ext}"
     
     cv2.imwrite(str(save_path), image)
     
+    # 保存姓名映射
+    _save_whitelist_name(file_id, name)
+    
     return jsonify({
         'success': True,
-        'name': save_path.stem,
+        'id': file_id,
+        'name': name,
         'face_count': len(faces)
     })
 
 @app.route('/whitelist/list')
 def list_whitelist():
     """获取白名单列表"""
+    names_map = _load_whitelist_names()
     whitelist = []
     for f in KNOWN_FACES_FOLDER.glob('*'):
         if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp']:
-            # 读取图片获取人脸数量
             img = cv2.imread(str(f))
             if img is not None:
                 proc = get_processor()
                 faces = proc.detect_faces(img)
                 whitelist.append({
-                    'name': f.stem,
+                    'id': f.stem,
+                    'name': names_map.get(f.stem, f.stem),
                     'filename': f.name,
                     'face_count': len(faces)
                 })
     
     return jsonify({'whitelist': whitelist})
 
-@app.route('/whitelist/delete/<name>')
-def delete_whitelist(name):
+@app.route('/whitelist/delete/<file_id>')
+def delete_whitelist(file_id):
     """删除白名单人员"""
-    safe_name = secure_filename(name)
+    # 只允许安全字符
+    safe_id = ''.join(c for c in file_id if c.isalnum() or c == '_')
     
     for f in KNOWN_FACES_FOLDER.glob('*'):
-        if f.stem == safe_name and f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp']:
+        if f.stem == safe_id and f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp']:
             f.unlink()
+            # 删除姓名映射
+            _remove_whitelist_name(safe_id)
             return jsonify({'success': True})
     
     return jsonify({'error': '未找到该人员'}), 404
